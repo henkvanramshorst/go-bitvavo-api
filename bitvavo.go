@@ -457,6 +457,8 @@ type Bitvavo struct {
 	WS                Websocket
 	reconnectTimer    int
 	Debugging         bool
+	KeepAlive         bool
+	KeepAliveTimeout  time.Duration
 }
 
 type Websocket struct {
@@ -519,22 +521,25 @@ type Websocket struct {
 	subscriptionBookOptionsSecondMap map[string]SubscriptionTradesBookObject
 }
 
-func (bitvavo Bitvavo) NewWebsocket() (*Websocket, chan MyError) {
+func (b Bitvavo) NewWebsocket() (*Websocket, chan MyError) {
 	ws := Websocket{}
-	ws.Debugging = bitvavo.Debugging
-	ws.ApiKey = bitvavo.ApiKey
-	ws.conn = bitvavo.InitWS()
+	ws.Debugging = b.Debugging
+	ws.ApiKey = b.ApiKey
+	ws.conn = b.InitWS()
 	ws.reconnectOnError = true
 	ws.authenticated = false
 	ws.authenticationFailed = false
 	ws.keepLocalBook = false
 	errChannel := make(chan MyError)
 	ws.errChannel = errChannel
-	go bitvavo.handleMessage(&ws)
+	if b.KeepAlive {
+		go b.keepAlive(&ws, b.KeepAliveTimeout)
+	}
+	go b.handleMessage(&ws)
 	return &ws, errChannel
 }
 
-func (bitvavo Bitvavo) createSignature(timestamp string, method string, url string, body map[string]string, ApiSecret string) string {
+func (b Bitvavo) createSignature(timestamp string, method string, url string, body map[string]string, ApiSecret string) string {
 	result := timestamp + method + "/v2" + url
 	if len(body) != 0 {
 		bodyString, err := json.Marshal(body)
@@ -549,20 +554,20 @@ func (bitvavo Bitvavo) createSignature(timestamp string, method string, url stri
 	return sha
 }
 
-func (bitvavo Bitvavo) sendPublic(endpoint string) []byte {
+func (b Bitvavo) sendPublic(endpoint string) []byte {
 	client := &http.Client{}
 	req, err := http.NewRequest("GET", endpoint, bytes.NewBuffer(nil))
 	if err != nil {
 		errorToConsole("We caught error " + err.Error())
 	}
-	if bitvavo.ApiKey != "" {
+	if b.ApiKey != "" {
 		millis := time.Now().UnixNano() / 1000000
 		timeString := strconv.FormatInt(millis, 10)
-		sig := bitvavo.createSignature(timeString, "GET", strings.Replace(endpoint, bitvavo.RestUrl, "", 1), map[string]string{}, bitvavo.ApiSecret)
-		req.Header.Set("Bitvavo-Access-Key", bitvavo.ApiKey)
+		sig := b.createSignature(timeString, "GET", strings.Replace(endpoint, b.RestUrl, "", 1), map[string]string{}, b.ApiSecret)
+		req.Header.Set("Bitvavo-Access-Key", b.ApiKey)
 		req.Header.Set("Bitvavo-Access-Signature", sig)
 		req.Header.Set("Bitvavo-Access-Timestamp", timeString)
-		req.Header.Set("Bitvavo-Access-Window", strconv.Itoa(bitvavo.AccessWindow))
+		req.Header.Set("Bitvavo-Access-Window", strconv.Itoa(b.AccessWindow))
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
@@ -581,11 +586,11 @@ func (bitvavo Bitvavo) sendPublic(endpoint string) []byte {
 	}
 }
 
-func (bitvavo Bitvavo) sendPrivate(endpoint string, postfix string, body map[string]string, method string) []byte {
+func (b Bitvavo) sendPrivate(endpoint string, postfix string, body map[string]string, method string) []byte {
 	millis := time.Now().UnixNano() / 1000000
 	timeString := strconv.FormatInt(millis, 10)
-	sig := bitvavo.createSignature(timeString, method, (endpoint + postfix), body, bitvavo.ApiSecret)
-	url := bitvavo.RestUrl + endpoint + postfix
+	sig := b.createSignature(timeString, method, (endpoint + postfix), body, b.ApiSecret)
+	url := b.RestUrl + endpoint + postfix
 	client := &http.Client{}
 	byteBody := []byte{}
 	if len(body) != 0 {
@@ -598,10 +603,10 @@ func (bitvavo Bitvavo) sendPrivate(endpoint string, postfix string, body map[str
 		byteBody = nil
 	}
 	req, err := http.NewRequest(method, url, bytes.NewBuffer(byteBody))
-	req.Header.Set("Bitvavo-Access-Key", bitvavo.ApiKey)
+	req.Header.Set("Bitvavo-Access-Key", b.ApiKey)
 	req.Header.Set("Bitvavo-Access-Signature", sig)
 	req.Header.Set("Bitvavo-Access-Timestamp", timeString)
-	req.Header.Set("Bitvavo-Access-Window", strconv.Itoa(bitvavo.AccessWindow))
+	req.Header.Set("Bitvavo-Access-Window", strconv.Itoa(b.AccessWindow))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
@@ -629,7 +634,7 @@ func updateRateLimit(response http.Header) {
 		if key == "Bitvavo-Ratelimit-Remaining" {
 			rateLimitRemaining, _ = strconv.Atoi(value[0])
 		}
-		if key == "Bitvavo-Ratelimit-Resetat" {
+		if key == "Bitvavo-Ratelimit-ResetAt" {
 			rateLimitReset, _ = strconv.Atoi(value[0])
 			now := int(time.Nanosecond * time.Duration(time.Now().UnixNano()) / time.Millisecond)
 			var timeToWait = rateLimitReset - now
@@ -638,11 +643,11 @@ func updateRateLimit(response http.Header) {
 	}
 }
 
-func (bitvavo Bitvavo) GetRemainingLimit() int {
+func (b Bitvavo) GetRemainingLimit() int {
 	return rateLimitRemaining
 }
 
-func (bitvavo Bitvavo) createPostfix(options map[string]string) string {
+func (b Bitvavo) createPostfix(options map[string]string) string {
 	result := []string{}
 	for k := range options {
 		result = append(result, (k + "=" + options[k]))
@@ -671,8 +676,8 @@ func handleAPIError(jsonResponse []byte) error {
 	return MyError{CustomError: e}
 }
 
-func (bitvavo Bitvavo) Time() (Time, error) {
-	jsonResponse := bitvavo.sendPublic(bitvavo.RestUrl + "/time")
+func (b Bitvavo) Time() (Time, error) {
+	jsonResponse := b.sendPublic(b.RestUrl + "/time")
 	var t Time
 
 	err := json.Unmarshal(jsonResponse, &t)
@@ -686,9 +691,9 @@ func (bitvavo Bitvavo) Time() (Time, error) {
 }
 
 // options: market
-func (bitvavo Bitvavo) Markets(options map[string]string) ([]Markets, error) {
-	postfix := bitvavo.createPostfix(options)
-	jsonResponse := bitvavo.sendPublic(bitvavo.RestUrl + "/markets" + postfix)
+func (b Bitvavo) Markets(options map[string]string) ([]Markets, error) {
+	postfix := b.createPostfix(options)
+	jsonResponse := b.sendPublic(b.RestUrl + "/markets" + postfix)
 	t := make([]Markets, 0)
 	err := json.Unmarshal(jsonResponse, &t)
 	if err != nil {
@@ -698,9 +703,9 @@ func (bitvavo Bitvavo) Markets(options map[string]string) ([]Markets, error) {
 }
 
 // options: symbol
-func (bitvavo Bitvavo) Assets(options map[string]string) ([]Assets, error) {
-	postfix := bitvavo.createPostfix(options)
-	jsonResponse := bitvavo.sendPublic(bitvavo.RestUrl + "/assets" + postfix)
+func (b Bitvavo) Assets(options map[string]string) ([]Assets, error) {
+	postfix := b.createPostfix(options)
+	jsonResponse := b.sendPublic(b.RestUrl + "/assets" + postfix)
 	t := make([]Assets, 0)
 	err := json.Unmarshal(jsonResponse, &t)
 	if err != nil {
@@ -710,9 +715,9 @@ func (bitvavo Bitvavo) Assets(options map[string]string) ([]Assets, error) {
 }
 
 // options: depth
-func (bitvavo Bitvavo) Book(symbol string, options map[string]string) (Book, error) {
-	postfix := bitvavo.createPostfix(options)
-	jsonResponse := bitvavo.sendPublic(bitvavo.RestUrl + "/" + symbol + "/book" + postfix)
+func (b Bitvavo) Book(symbol string, options map[string]string) (Book, error) {
+	postfix := b.createPostfix(options)
+	jsonResponse := b.sendPublic(b.RestUrl + "/" + symbol + "/book" + postfix)
 	var t Book
 	err := json.Unmarshal(jsonResponse, &t)
 	if err != nil {
@@ -725,9 +730,9 @@ func (bitvavo Bitvavo) Book(symbol string, options map[string]string) (Book, err
 }
 
 // options: limit, start, end, tradeIdFrom, tradeIdTo
-func (bitvavo Bitvavo) PublicTrades(symbol string, options map[string]string) ([]PublicTrades, error) {
-	postfix := bitvavo.createPostfix(options)
-	jsonResponse := bitvavo.sendPublic(bitvavo.RestUrl + "/" + symbol + "/trades" + postfix)
+func (b Bitvavo) PublicTrades(symbol string, options map[string]string) ([]PublicTrades, error) {
+	postfix := b.createPostfix(options)
+	jsonResponse := b.sendPublic(b.RestUrl + "/" + symbol + "/trades" + postfix)
 	t := make([]PublicTrades, 0)
 	err := json.Unmarshal(jsonResponse, &t)
 	if err != nil {
@@ -737,10 +742,10 @@ func (bitvavo Bitvavo) PublicTrades(symbol string, options map[string]string) ([
 }
 
 // options: limit, start, end
-func (bitvavo Bitvavo) Candles(symbol string, interval string, options map[string]string) ([]Candle, error) {
+func (b Bitvavo) Candles(symbol string, interval string, options map[string]string) ([]Candle, error) {
 	options["interval"] = interval
-	postfix := bitvavo.createPostfix(options)
-	jsonResponse := bitvavo.sendPublic(bitvavo.RestUrl + "/" + symbol + "/candles" + postfix)
+	postfix := b.createPostfix(options)
+	jsonResponse := b.sendPublic(b.RestUrl + "/" + symbol + "/candles" + postfix)
 	var t []interface{}
 	err := json.Unmarshal(jsonResponse, &t)
 	if err != nil {
@@ -755,9 +760,9 @@ func (bitvavo Bitvavo) Candles(symbol string, interval string, options map[strin
 }
 
 // options: market
-func (bitvavo Bitvavo) TickerPrice(options map[string]string) ([]TickerPrice, error) {
-	postfix := bitvavo.createPostfix(options)
-	jsonResponse := bitvavo.sendPublic(bitvavo.RestUrl + "/ticker/price" + postfix)
+func (b Bitvavo) TickerPrice(options map[string]string) ([]TickerPrice, error) {
+	postfix := b.createPostfix(options)
+	jsonResponse := b.sendPublic(b.RestUrl + "/ticker/price" + postfix)
 	t := make([]TickerPrice, 0)
 	err := json.Unmarshal(jsonResponse, &t)
 	if err != nil {
@@ -775,9 +780,9 @@ func (bitvavo Bitvavo) TickerPrice(options map[string]string) ([]TickerPrice, er
 }
 
 // options: market
-func (bitvavo Bitvavo) TickerBook(options map[string]string) ([]TickerBook, error) {
-	postfix := bitvavo.createPostfix(options)
-	jsonResponse := bitvavo.sendPublic(bitvavo.RestUrl + "/ticker/book" + postfix)
+func (b Bitvavo) TickerBook(options map[string]string) ([]TickerBook, error) {
+	postfix := b.createPostfix(options)
+	jsonResponse := b.sendPublic(b.RestUrl + "/ticker/book" + postfix)
 	t := make([]TickerBook, 0)
 	err := json.Unmarshal(jsonResponse, &t)
 	if err != nil {
@@ -795,9 +800,9 @@ func (bitvavo Bitvavo) TickerBook(options map[string]string) ([]TickerBook, erro
 }
 
 // options: market
-func (bitvavo Bitvavo) Ticker24h(options map[string]string) ([]Ticker24h, error) {
-	postfix := bitvavo.createPostfix(options)
-	jsonResponse := bitvavo.sendPublic(bitvavo.RestUrl + "/ticker/24h" + postfix)
+func (b Bitvavo) Ticker24h(options map[string]string) ([]Ticker24h, error) {
+	postfix := b.createPostfix(options)
+	jsonResponse := b.sendPublic(b.RestUrl + "/ticker/24h" + postfix)
 	t := make([]Ticker24h, 0)
 	err := json.Unmarshal(jsonResponse, &t)
 	if err != nil {
@@ -815,11 +820,11 @@ func (bitvavo Bitvavo) Ticker24h(options map[string]string) ([]Ticker24h, error)
 }
 
 // optional body parameters: limit:(amount, price, postOnly), market:(amount, amountQuote, disableMarketProtection), both: timeInForce, selfTradePrevention, responseRequired
-func (bitvavo Bitvavo) PlaceOrder(market string, side string, orderType string, body map[string]string) (Order, error) {
+func (b Bitvavo) PlaceOrder(market string, side string, orderType string, body map[string]string) (Order, error) {
 	body["market"] = market
 	body["side"] = side
 	body["orderType"] = orderType
-	jsonResponse := bitvavo.sendPrivate("/order", "", body, "POST")
+	jsonResponse := b.sendPrivate("/order", "", body, "POST")
 	var t Order
 	err := json.Unmarshal(jsonResponse, &t)
 	if err != nil {
@@ -831,10 +836,10 @@ func (bitvavo Bitvavo) PlaceOrder(market string, side string, orderType string, 
 	return t, nil
 }
 
-func (bitvavo Bitvavo) GetOrder(market string, orderId string) (Order, error) {
+func (b Bitvavo) GetOrder(market string, orderId string) (Order, error) {
 	options := map[string]string{"market": market, "orderId": orderId}
-	postfix := bitvavo.createPostfix(options)
-	jsonResponse := bitvavo.sendPrivate("/order", postfix, map[string]string{}, "GET")
+	postfix := b.createPostfix(options)
+	jsonResponse := b.sendPrivate("/order", postfix, map[string]string{}, "GET")
 	var t Order
 	err := json.Unmarshal(jsonResponse, &t)
 	if err != nil {
@@ -848,10 +853,10 @@ func (bitvavo Bitvavo) GetOrder(market string, orderId string) (Order, error) {
 
 // Optional body parameters: limit:(amount, amountRemaining, price, timeInForce, selfTradePrevention, postOnly)
 // (set at least 1) (responseRequired can be set as well, but does not update anything)
-func (bitvavo Bitvavo) UpdateOrder(market string, orderId string, body map[string]string) (Order, error) {
+func (b Bitvavo) UpdateOrder(market string, orderId string, body map[string]string) (Order, error) {
 	body["market"] = market
 	body["orderId"] = orderId
-	jsonResponse := bitvavo.sendPrivate("/order", "", body, "PUT")
+	jsonResponse := b.sendPrivate("/order", "", body, "PUT")
 	var t Order
 	err := json.Unmarshal(jsonResponse, &t)
 	if err != nil {
@@ -863,10 +868,10 @@ func (bitvavo Bitvavo) UpdateOrder(market string, orderId string, body map[strin
 	return t, nil
 }
 
-func (bitvavo Bitvavo) CancelOrder(market string, orderId string) (CancelOrder, error) {
+func (b Bitvavo) CancelOrder(market string, orderId string) (CancelOrder, error) {
 	options := map[string]string{"market": market, "orderId": orderId}
-	postfix := bitvavo.createPostfix(options)
-	jsonResponse := bitvavo.sendPrivate("/order", postfix, map[string]string{}, "DELETE")
+	postfix := b.createPostfix(options)
+	jsonResponse := b.sendPrivate("/order", postfix, map[string]string{}, "DELETE")
 	var t CancelOrder
 	err := json.Unmarshal(jsonResponse, &t)
 	if err != nil {
@@ -879,10 +884,10 @@ func (bitvavo Bitvavo) CancelOrder(market string, orderId string) (CancelOrder, 
 }
 
 // options: limit, start, end, orderIdFrom, orderIdTo
-func (bitvavo Bitvavo) GetOrders(market string, options map[string]string) ([]Order, error) {
+func (b Bitvavo) GetOrders(market string, options map[string]string) ([]Order, error) {
 	options["market"] = market
-	postfix := bitvavo.createPostfix(options)
-	jsonResponse := bitvavo.sendPrivate("/orders", postfix, map[string]string{}, "GET")
+	postfix := b.createPostfix(options)
+	jsonResponse := b.sendPrivate("/orders", postfix, map[string]string{}, "GET")
 	t := make([]Order, 0)
 	err := json.Unmarshal(jsonResponse, &t)
 	if err != nil {
@@ -892,9 +897,9 @@ func (bitvavo Bitvavo) GetOrders(market string, options map[string]string) ([]Or
 }
 
 // options: market
-func (bitvavo Bitvavo) CancelOrders(options map[string]string) ([]CancelOrder, error) {
-	postfix := bitvavo.createPostfix(options)
-	jsonResponse := bitvavo.sendPrivate("/orders", postfix, map[string]string{}, "DELETE")
+func (b Bitvavo) CancelOrders(options map[string]string) ([]CancelOrder, error) {
+	postfix := b.createPostfix(options)
+	jsonResponse := b.sendPrivate("/orders", postfix, map[string]string{}, "DELETE")
 	t := make([]CancelOrder, 0)
 	err := json.Unmarshal(jsonResponse, &t)
 	if err != nil {
@@ -904,9 +909,9 @@ func (bitvavo Bitvavo) CancelOrders(options map[string]string) ([]CancelOrder, e
 }
 
 // options: market
-func (bitvavo Bitvavo) OrdersOpen(options map[string]string) ([]Order, error) {
-	postfix := bitvavo.createPostfix(options)
-	jsonResponse := bitvavo.sendPrivate("/ordersOpen", postfix, map[string]string{}, "GET")
+func (b Bitvavo) OrdersOpen(options map[string]string) ([]Order, error) {
+	postfix := b.createPostfix(options)
+	jsonResponse := b.sendPrivate("/ordersOpen", postfix, map[string]string{}, "GET")
 	t := make([]Order, 0)
 	err := json.Unmarshal(jsonResponse, &t)
 	if err != nil {
@@ -916,10 +921,10 @@ func (bitvavo Bitvavo) OrdersOpen(options map[string]string) ([]Order, error) {
 }
 
 // options: limit, start, end, tradeIdFrom, tradeIdTo
-func (bitvavo Bitvavo) Trades(market string, options map[string]string) ([]Trades, error) {
+func (b Bitvavo) Trades(market string, options map[string]string) ([]Trades, error) {
 	options["market"] = market
-	postfix := bitvavo.createPostfix(options)
-	jsonResponse := bitvavo.sendPrivate("/trades", postfix, map[string]string{}, "GET")
+	postfix := b.createPostfix(options)
+	jsonResponse := b.sendPrivate("/trades", postfix, map[string]string{}, "GET")
 	t := make([]Trades, 0)
 	err := json.Unmarshal(jsonResponse, &t)
 	if err != nil {
@@ -929,9 +934,9 @@ func (bitvavo Bitvavo) Trades(market string, options map[string]string) ([]Trade
 }
 
 // options: symbol
-func (bitvavo Bitvavo) Balance(options map[string]string) ([]Balance, error) {
-	postfix := bitvavo.createPostfix(options)
-	jsonResponse := bitvavo.sendPrivate("/balance", postfix, map[string]string{}, "GET")
+func (b Bitvavo) Balance(options map[string]string) ([]Balance, error) {
+	postfix := b.createPostfix(options)
+	jsonResponse := b.sendPrivate("/balance", postfix, map[string]string{}, "GET")
 	t := make([]Balance, 0)
 	err := json.Unmarshal(jsonResponse, &t)
 	if err != nil {
@@ -940,10 +945,10 @@ func (bitvavo Bitvavo) Balance(options map[string]string) ([]Balance, error) {
 	return t, nil
 }
 
-func (bitvavo Bitvavo) DepositAssets(symbol string) (DepositAssets, error) {
+func (b Bitvavo) DepositAssets(symbol string) (DepositAssets, error) {
 	options := map[string]string{"symbol": symbol}
-	postfix := bitvavo.createPostfix(options)
-	jsonResponse := bitvavo.sendPrivate("/deposit", postfix, map[string]string{}, "GET")
+	postfix := b.createPostfix(options)
+	jsonResponse := b.sendPrivate("/deposit", postfix, map[string]string{}, "GET")
 	var t DepositAssets
 	err := json.Unmarshal(jsonResponse, &t)
 	if err != nil {
@@ -956,11 +961,11 @@ func (bitvavo Bitvavo) DepositAssets(symbol string) (DepositAssets, error) {
 }
 
 // optional body parameters: paymentId, internal, addWithdrawalFee
-func (bitvavo Bitvavo) WithdrawAssets(symbol string, amount string, address string, body map[string]string) (WithdrawAssets, error) {
+func (b Bitvavo) WithdrawAssets(symbol string, amount string, address string, body map[string]string) (WithdrawAssets, error) {
 	body["symbol"] = symbol
 	body["amount"] = amount
 	body["address"] = address
-	jsonResponse := bitvavo.sendPrivate("/withdrawal", "", body, "POST")
+	jsonResponse := b.sendPrivate("/withdrawal", "", body, "POST")
 	var t WithdrawAssets
 	err := json.Unmarshal(jsonResponse, &t)
 	if err != nil {
@@ -973,9 +978,9 @@ func (bitvavo Bitvavo) WithdrawAssets(symbol string, amount string, address stri
 }
 
 // options: symbol, limit, start, end
-func (bitvavo Bitvavo) DepositHistory(options map[string]string) ([]History, error) {
-	postfix := bitvavo.createPostfix(options)
-	jsonResponse := bitvavo.sendPrivate("/depositHistory", postfix, map[string]string{}, "GET")
+func (b Bitvavo) DepositHistory(options map[string]string) ([]History, error) {
+	postfix := b.createPostfix(options)
+	jsonResponse := b.sendPrivate("/depositHistory", postfix, map[string]string{}, "GET")
 	t := make([]History, 0)
 	err := json.Unmarshal(jsonResponse, &t)
 	if err != nil {
@@ -985,9 +990,9 @@ func (bitvavo Bitvavo) DepositHistory(options map[string]string) ([]History, err
 }
 
 // options: symbol, limit, start, end
-func (bitvavo Bitvavo) WithdrawalHistory(options map[string]string) ([]History, error) {
-	postfix := bitvavo.createPostfix(options)
-	jsonResponse := bitvavo.sendPrivate("/withdrawalHistory", postfix, map[string]string{}, "GET")
+func (b Bitvavo) WithdrawalHistory(options map[string]string) ([]History, error) {
+	postfix := b.createPostfix(options)
+	jsonResponse := b.sendPrivate("/withdrawalHistory", postfix, map[string]string{}, "GET")
 	t := make([]History, 0)
 	err := json.Unmarshal(jsonResponse, &t)
 	if err != nil {
@@ -1064,8 +1069,8 @@ func addToBook(t SubscriptionBookUpdate, ws *Websocket) {
 	ws.subscriptionBookChannelMap[t.Market] <- ws.localBook.Book[t.Market]
 }
 
-func (bitvavo Bitvavo) DebugToConsole(message string) {
-	if bitvavo.Debugging {
+func (b Bitvavo) DebugToConsole(message string) {
+	if b.Debugging {
 		fmt.Println(time.Now().Format("15:04:05") + " DEBUG: " + message)
 	}
 }
@@ -1080,15 +1085,15 @@ func errorToConsole(message string) {
 	fmt.Println(time.Now().Format("15:04:05") + " ERROR: " + message)
 }
 
-func (bitvavo Bitvavo) reconnect(ws *Websocket) {
-	bitvavo.DebugToConsole("Reconnecting")
+func (b Bitvavo) reconnect(ws *Websocket) {
+	b.DebugToConsole("Reconnecting")
 	time.Sleep(500 * time.Millisecond)
 	ws.authenticated = false
 	ws.authenticationFailed = false
 	ws.keepLocalBook = false
-	ws.conn = bitvavo.InitWS()
+	ws.conn = b.InitWS()
 
-	go bitvavo.handleMessage(ws)
+	go b.handleMessage(ws)
 
 	for market := range ws.subscriptionTickerOptionsMap {
 		myMessage, _ := json.Marshal(ws.subscriptionTickerOptionsMap[market])
@@ -1127,18 +1132,18 @@ func (bitvavo Bitvavo) reconnect(ws *Websocket) {
 	}
 }
 
-func (bitvavo Bitvavo) handleMessage(ws *Websocket) {
+func (b Bitvavo) handleMessage(ws *Websocket) {
 	for {
-		bitvavo.reconnectTimer = 100
+		b.reconnectTimer = 100
 		_, message, err := ws.conn.ReadMessage()
 		if handleError(err) {
 			if ws.reconnectOnError {
 				err = ws.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-				bitvavo.reconnect(ws)
+				b.reconnect(ws)
 			}
 			return
 		}
-		bitvavo.DebugToConsole("FULL RESPONSE: " + string(message))
+		b.DebugToConsole("FULL RESPONSE: " + string(message))
 		var x map[string]interface{}
 		err = json.Unmarshal(message, &x)
 		if handleError(err) {
@@ -1407,36 +1412,61 @@ func (bitvavo Bitvavo) handleMessage(ws *Websocket) {
 	errorToConsole("HandleMessage has ended, messages will no longer be received, please restart.")
 }
 
-func (bitvavo Bitvavo) InitWS() *websocket.Conn {
-	bitvavo.reconnectTimer = 100
-	uri, _ := url.Parse(bitvavo.WsUrl)
+func (b Bitvavo) InitWS() *websocket.Conn {
+	b.reconnectTimer = 100
+	uri, _ := url.Parse(b.WsUrl)
 	c, _, err := websocket.DefaultDialer.Dial(uri.String(), nil)
 	if err != nil {
 		errorToConsole("Caught error " + err.Error())
-		c = bitvavo.retryReconnect()
+		c = b.retryReconnect()
 	}
 	now := time.Now()
 	nanos := now.UnixNano()
 	millis := nanos / 1000000
 	timestamp := strconv.FormatInt(millis, 10)
-	if bitvavo.ApiKey != "" {
-		authenticate := map[string]string{"action": "authenticate", "key": bitvavo.ApiKey, "signature": bitvavo.createSignature(timestamp, "GET", "/websocket", map[string]string{}, bitvavo.ApiSecret), "timestamp": timestamp, "window": strconv.Itoa(bitvavo.AccessWindow)}
+	if b.ApiKey != "" {
+		authenticate := map[string]string{"action": "authenticate", "key": b.ApiKey, "signature": b.createSignature(timestamp, "GET", "/websocket", map[string]string{}, b.ApiSecret), "timestamp": timestamp, "window": strconv.Itoa(b.AccessWindow)}
 		myMessage, _ := json.Marshal(authenticate)
-		bitvavo.DebugToConsole("SENDING: " + string(myMessage))
+		b.DebugToConsole("SENDING: " + string(myMessage))
 		c.WriteMessage(websocket.TextMessage, []byte(myMessage))
 	}
 	return c
 }
 
-func (bitvavo Bitvavo) retryReconnect() *websocket.Conn {
-	time.Sleep(time.Duration(bitvavo.reconnectTimer) * time.Millisecond)
-	bitvavo.reconnectTimer = bitvavo.reconnectTimer * 2
-	bitvavo.DebugToConsole("We waited for " + strconv.Itoa(bitvavo.reconnectTimer) + " seconds to reconnect")
-	uri, _ := url.Parse(bitvavo.WsUrl)
+func (b Bitvavo) keepAlive(ws *Websocket, timeout time.Duration) {
+	lastResponse := time.Now()
+	ws.conn.SetPongHandler(func(msg string) error {
+		lastResponse = time.Now()
+		return nil
+	})
+
+	go func() {
+		for {
+			err := ws.conn.WriteMessage(websocket.PingMessage, []byte("keepalive"))
+			if err != nil {
+				errorToConsole("Caught error " + err.Error())
+				b.reconnect(ws)
+				return
+			}
+			time.Sleep(timeout / 2)
+			if time.Now().Sub(lastResponse) > timeout {
+				errorToConsole("Connection not alive")
+				b.reconnect(ws)
+				return
+			}
+		}
+	}()
+}
+
+func (b Bitvavo) retryReconnect() *websocket.Conn {
+	time.Sleep(time.Duration(b.reconnectTimer) * time.Millisecond)
+	b.reconnectTimer = b.reconnectTimer * 2
+	b.DebugToConsole("We waited for " + strconv.Itoa(b.reconnectTimer) + " seconds to reconnect")
+	uri, _ := url.Parse(b.WsUrl)
 	c, _, err := websocket.DefaultDialer.Dial(uri.String(), nil)
 	if err != nil {
 		errorToConsole("Caught error " + err.Error())
-		c = bitvavo.retryReconnect()
+		c = b.retryReconnect()
 		return c
 	}
 	return c
