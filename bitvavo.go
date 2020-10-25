@@ -1444,13 +1444,13 @@ func (b Bitvavo) keepAlive(ws *Websocket, timeout time.Duration) {
 		for {
 			err := ws.conn.WriteMessage(websocket.PingMessage, []byte("keepalive"))
 			if err != nil {
-				errorToConsole("Caught error " + err.Error())
-				b.reconnect(ws)
+				errorToConsole("Caught error while keeping alive: " + err.Error())
 				return
 			}
 			time.Sleep(timeout / 2)
 			if time.Now().Sub(lastResponse) > timeout {
 				errorToConsole("Connection not alive")
+				ws.conn.Close()
 				b.reconnect(ws)
 				return
 			}
