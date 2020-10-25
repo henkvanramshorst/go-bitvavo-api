@@ -1093,6 +1093,9 @@ func (b Bitvavo) reconnect(ws *Websocket) {
 	ws.keepLocalBook = false
 	ws.conn = b.InitWS()
 
+	if b.KeepAlive {
+		go b.keepAlive(ws, b.KeepAliveTimeout)
+	}
 	go b.handleMessage(ws)
 
 	for market := range ws.subscriptionTickerOptionsMap {
