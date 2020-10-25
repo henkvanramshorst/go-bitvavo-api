@@ -534,6 +534,7 @@ func (b Bitvavo) NewWebsocket() (*Websocket, chan MyError) {
 	ws.errChannel = errChannel
 	if b.KeepAlive {
 		go b.keepAlive(&ws, b.KeepAliveTimeout)
+		time.Sleep(time.Second)
 	}
 	go b.handleMessage(&ws)
 	return &ws, errChannel
@@ -1095,6 +1096,7 @@ func (b Bitvavo) reconnect(ws *Websocket) {
 
 	if b.KeepAlive {
 		go b.keepAlive(ws, b.KeepAliveTimeout)
+		time.Sleep(time.Second)
 	}
 	go b.handleMessage(ws)
 
