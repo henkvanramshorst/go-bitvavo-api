@@ -1451,7 +1451,7 @@ func (b Bitvavo) keepAlive(ws *Websocket, timeout time.Duration) {
 			if time.Now().Sub(lastResponse) > timeout {
 				errorToConsole("Connection not alive")
 				ws.conn.Close()
-				b.reconnect(ws)
+				//b.reconnect(ws)
 				return
 			}
 		}
